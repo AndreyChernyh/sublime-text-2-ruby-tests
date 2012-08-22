@@ -186,7 +186,7 @@ class BaseRubyTask(sublime_plugin.TextCommand):
     def get_project_root(self): return self.find_project_root(CUCUMBER_UNIT_FOLDER)
 
   class RSpecFile(RubyFile):
-    def possible_alternate_files(self): return [self.file_name.replace("_spec.rb", ".rb")]
+    def possible_alternate_files(self): return [self.file_name.replace("_spec.rb", ".rb"), self.file_name.replace("haml_spec.rb", "haml")]
     def run_all_tests_command(self): return "{command} {relative_path}".format(command=SPIN_UNIT if USE_SPIN else RSPEC_UNIT, relative_path=self.relative_file_path(RSPEC_UNIT_FOLDER))
     def run_single_test_command(self, view): 
       current_line_number = self.get_current_line_number(view)
