@@ -5,7 +5,6 @@ import sublime
 import string
 import sublime_plugin
 
-
 class ShowInPanel:
   def __init__(self, window):
     self.window = window
@@ -13,7 +12,9 @@ class ShowInPanel:
   def display_results(self):
     self.panel = self.window.get_output_panel("exec")
     self.window.run_command("show_panel", {"panel": "output.exec"})
-    self.panel.settings().set("color_scheme", "Packages/RubyTest/TestConsole.tmTheme")
+    if HIDE_PANEL:
+      self.window.run_command("hide_panel")
+    self.panel.settings().set("color_scheme", "Packages/RubyTest/TestConsole.hidden-tmTheme")
 
 
 class ShowInScratch:
@@ -25,12 +26,15 @@ class ShowInScratch:
   def display_results(self):
     self.panel = self.window.get_output_panel("exec")
     self.window.run_command("hide_panel")
-    self.view = self.window.new_file()
+    self.view = self.window.open_file("Test Results")
     self.view.set_scratch(True)
-    self.view.set_name("Test Results")
-    self.view.settings().set("color_scheme", "Packages/RubyTest/TestConsole.tmTheme")
+    self.view.set_read_only(False)
+
+    self.view.settings().set("syntax", "Packages/RubyTest/TestConsole.tmLanguage")
+    self.view.settings().set("color_scheme", "Packages/RubyTest/TestConsole.hidden-tmTheme")
     self.view.set_read_only(True)
     self.poll_copy()
+    self.append('\n\n')
 
   def poll_copy(self):
     # FIXME HACK: Stop polling after one minute
@@ -38,16 +42,20 @@ class ShowInScratch:
       self.active_for += 50
       sublime.set_timeout(self.copy_stuff, 50)
 
+  def append(self, content):
+    self.view.set_read_only(False)
+    edit = self.view.begin_edit()
+    self.view.insert(edit, self.view.size(), content)
+    self.view.end_edit(edit)
+    self.view.set_read_only(True)
+    self.view.set_viewport_position((self.view.size(), self.view.size()), True)
+
   def copy_stuff(self):
     size = self.panel.size()
     content = self.panel.substr(sublime.Region(self.copied_until, size))
     if content:
       self.copied_until = size
-      self.view.set_read_only(False)
-      edit = self.view.begin_edit()
-      self.view.insert(edit, self.view.size(), content)
-      self.view.end_edit(edit)
-      self.view.set_read_only(True)
+      self.append(content)
     self.poll_copy()
 
 class TestMethodMatcher(object):
@@ -80,23 +88,30 @@ class TestMethodMatcher(object):
       if not match_obj:
         return None
       test_name = match_obj.group(1)[::-1]
-      return "%s%s%s" % ("/", test_name.replace("should", "").strip(), "/")
+      return "%s%s%s" % ("/", test_name.replace("should", "").replace("\"", "").strip(), "/")
+
+
+class RubyTestSettings:
+  def __init__(self):
+    self.settings = sublime.load_settings("RubyTest.sublime-settings")
+
+  def __getattr__(self, name):
+    if not self.settings.has(name):
+      raise AttributeError(name)
+    return lambda **kwargs: self.settings.get(name).format(**kwargs)
 
 
 class BaseRubyTask(sublime_plugin.TextCommand):
   def load_config(self):
     s = sublime.load_settings("RubyTest.sublime-settings")
-    global RUBY_UNIT; RUBY_UNIT = s.get("ruby_unit_exec")
-    global ERB_EXEC; ERB_EXEC = s.get("erb_exec")
-    global CUCUMBER_UNIT; CUCUMBER_UNIT = s.get("ruby_cucumber_exec")
-    global RSPEC_UNIT; RSPEC_UNIT = s.get("ruby_rspec_exec")
     global RUBY_UNIT_FOLDER; RUBY_UNIT_FOLDER = s.get("ruby_unit_folder")
     global CUCUMBER_UNIT_FOLDER; CUCUMBER_UNIT_FOLDER = s.get("ruby_cucumber_folder")
     global RSPEC_UNIT_FOLDER; RSPEC_UNIT_FOLDER = s.get("ruby_rspec_folder")
     global USE_SCRATCH; USE_SCRATCH = s.get("ruby_use_scratch")
     global IGNORED_DIRECTORIES; IGNORED_DIRECTORIES = s.get("ignored_directories")
-    global USE_SPIN; USE_SPIN = s.get("use_spin")
-    global SPIN_UNIT; SPIN_UNIT = s.get("spin_exec")
+    global HIDE_PANEL; HIDE_PANEL = s.get("hide_panel")
+    global BEFORE_CALLBACK; BEFORE_CALLBACK = s.get("before_callback")
+    global AFTER_CALLBACK; AFTER_CALLBACK = s.get("after_callback")
 
     if s.get("save_on_run"):
       self.window().run_command("save_all")
@@ -111,6 +126,10 @@ class BaseRubyTask(sublime_plugin.TextCommand):
   def run_shell_command(self, command, working_dir):
     if not command:
       return False
+    if BEFORE_CALLBACK:
+      os.system(BEFORE_CALLBACK)
+    if AFTER_CALLBACK:
+      command += " ; " + AFTER_CALLBACK
     self.save_test_run(command, working_dir)
     self.view.window().run_command("exec", {
       "cmd": [command],
@@ -138,7 +157,7 @@ class BaseRubyTask(sublime_plugin.TextCommand):
     def verify_syntax_command(self): return None
     def possible_alternate_files(self): return []
     def run_all_tests_command(self): return None
-    def get_project_root(self): return None
+    def get_project_root(self): return self.folder_name
     def find_project_root(self, partition_folder):
       to_find = os.sep + partition_folder + os.sep
       project_root, _, _ = self.absolute_path.partition(to_find)
@@ -157,13 +176,13 @@ class BaseRubyTask(sublime_plugin.TextCommand):
       True
 
   class RubyFile(BaseFile):
-    def verify_syntax_command(self): return "{ruby} -c {absolute_path}".format(ruby=RUBY_UNIT, absolute_path=self.absolute_path)
+    def verify_syntax_command(self): return RubyTestSettings().ruby_verify_command(file_name=self.file_name)
     def possible_alternate_files(self): return [self.file_name.replace(".rb", "_spec.rb"), self.file_name.replace(".rb", "_test.rb"), self.file_name.replace(".rb", ".feature")]
     def features(self): return ["verify_syntax", "switch_to_test", "rails_generate", "extract_variable"]
 
   class UnitFile(RubyFile):
     def possible_alternate_files(self): return [self.file_name.replace("_test.rb", ".rb")]
-    def run_all_tests_command(self): return "{ruby} -Itest {relative_path}".format(ruby=SPIN_UNIT if USE_SPIN else RUBY_UNIT, relative_path=self.relative_file_path(RUBY_UNIT_FOLDER))
+    def run_all_tests_command(self): return RubyTestSettings().run_ruby_unit_command(relative_path=self.relative_file_path(RUBY_UNIT_FOLDER))
     def run_single_test_command(self, view):
       region = view.sel()[0]
       line_region = view.line(region)
@@ -174,32 +193,26 @@ class BaseRubyTask(sublime_plugin.TextCommand):
       if test_name is None:
         sublime.error_message("No test name!")
         return None
-      return "{ruby} -Itest {relative_path} -n '{test_name}'".format(ruby=RUBY_UNIT, relative_path=self.relative_file_path(RUBY_UNIT_FOLDER), test_name=test_name)
+      return RubyTestSettings().run_single_ruby_unit_command(relative_path=self.relative_file_path(RUBY_UNIT_FOLDER), test_name=test_name)
     def features(self): return super(BaseRubyTask.UnitFile, self).features() + ["run_test"]
     def get_project_root(self): return self.find_project_root(RUBY_UNIT_FOLDER)
 
   class CucumberFile(BaseFile):
     def possible_alternate_files(self): return [self.file_name.replace(".feature", ".rb")]
-    def run_all_tests_command(self): return "{cucumber} {relative_path}".format(cucumber=CUCUMBER_UNIT, relative_path=self.relative_file_path(CUCUMBER_UNIT_FOLDER))
-    def run_single_test_command(self, view): return "{cucumber} {relative_path} -l{line_number}".format(cucumber=CUCUMBER_UNIT, relative_path=self.relative_file_path(CUCUMBER_UNIT_FOLDER), line_number=self.get_current_line_number(view))
+    def run_all_tests_command(self): return RubyTestSettings().run_cucumber_command(relative_path=self.relative_file_path(CUCUMBER_UNIT_FOLDER))
+    def run_single_test_command(self, view): return RubyTestSettings().run_single_cucumber_command(relative_path=self.relative_file_path(CUCUMBER_UNIT_FOLDER), line_number=self.get_current_line_number(view))
     def features(self): return ["run_test"]
     def get_project_root(self): return self.find_project_root(CUCUMBER_UNIT_FOLDER)
 
   class RSpecFile(RubyFile):
     def possible_alternate_files(self): return [self.file_name.replace("_spec.rb", ".rb"), self.file_name.replace("haml_spec.rb", "haml")]
-    def run_all_tests_command(self): return "{command} {relative_path}".format(command=SPIN_UNIT if USE_SPIN else RSPEC_UNIT, relative_path=self.relative_file_path(RSPEC_UNIT_FOLDER))
-    def run_single_test_command(self, view): 
-      current_line_number = self.get_current_line_number(view)
-      if USE_SPIN:
-        current_line_number_for_command = "%s%s" % (":", current_line_number)
-      else:
-        current_line_number_for_command = " %s%s" % (" -l", current_line_number)
-      return "{rspec} {relative_path}{line_number}".format(rspec=SPIN_UNIT if USE_SPIN else RSPEC_UNIT, relative_path=self.relative_file_path(RSPEC_UNIT_FOLDER), line_number=current_line_number_for_command)
+    def run_all_tests_command(self): return RubyTestSettings().run_rspec_command(relative_path=self.relative_file_path(RSPEC_UNIT_FOLDER))
+    def run_single_test_command(self, view): return RubyTestSettings().run_single_rspec_command(relative_path=self.relative_file_path(RSPEC_UNIT_FOLDER), line_number=self.get_current_line_number(view))
     def features(self): return super(BaseRubyTask.RSpecFile, self).features() + ["run_test"]
     def get_project_root(self): return self.find_project_root(RSPEC_UNIT_FOLDER)
 
   class ErbFile(BaseFile):
-    def verify_syntax_command(self): return "{erb} -xT - {file_name} | {ruby} -c".format(erb=ERB_EXEC, file_name=self.file_name, ruby=RUBY_UNIT)
+    def verify_syntax_command(self): return RubyTestSettings().erb_verify_command(file_name=self.file_name)
     def can_verify_syntax(self): return True
     def features(self): return ["verify_syntax"]
 
